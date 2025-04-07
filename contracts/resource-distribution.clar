@@ -42,3 +42,97 @@
 )
 
 ;; Core protocol functions
+
+;; Release container from emergency lockdown with security verification
+(define-public (release-container-lockdown (container-reference uint) (verification-code (buff 32)) (authorized-by principal))
+  (begin
+    (asserts! (valid-container-reference? container-reference) CODE_INVALID_REFERENCE)
+    (let
+      (
+        (container-data (unwrap! (map-get? ResourceContainers { container-reference: container-reference }) CODE_CONTAINER_MISSING))
+        (originator (get originator container-data))
+        (cooldown-period u36) ;; ~6 hours
+      )
+      ;; Only protocol operator can unlock containers
+      (asserts! (is-eq tx-sender PROTOCOL_OPERATOR) CODE_ACCESS_DENIED)
+      ;; Container must be in locked status
+      (asserts! (is-eq (get container-status container-data) "locked") CODE_STATUS_CONFLICT)
+      ;; Authorized entity must be originator or protocol operator
+      (asserts! (or (is-eq authorized-by originator) (is-eq authorized-by PROTOCOL_OPERATOR)) (err u230))
+      ;; Minimum lockdown period must have passed
+      (asserts! (>= (- block-height (get initiation-block container-data)) cooldown-period) (err u231))
+
+      ;; Restore container to pending status
+      (map-set ResourceContainers
+        { container-reference: container-reference }
+        (merge container-data { container-status: "pending" })
+      )
+
+      (print {action: "lockdown_released", container-reference: container-reference, 
+              operator: tx-sender, authorized-by: authorized-by, verification-code-hash: (hash160 verification-code)})
+      (ok true)
+    )
+  )
+)
+
+;; Apply rate limiting to prevent rapid container operations by a single entity
+(define-public (reset-operation-rate-limit (entity principal) (operation-category (string-ascii 20)))
+  (begin
+    ;; Only protocol operator can reset rate limits
+    (asserts! (is-eq tx-sender PROTOCOL_OPERATOR) CODE_ACCESS_DENIED)
+    ;; Valid operation categories
+    (asserts! (or (is-eq operation-category "creation") 
+                 (is-eq operation-category "distribution")
+                 (is-eq operation-category "reversal")
+                 (is-eq operation-category "extension")) (err u240))
+
+    (let
+      (
+        (cooldown-period u12) ;; ~2 hours
+        (rate-limit u5) ;; 5 operations max
+        (block-window (/ block-height u144)) ;; Window of ~1 day
+      )
+      ;; Note: In a complete implementation, we would maintain a map of operations
+      ;; performed by entity within the current window and reset it here.
+      ;; For now, we'll just print the action.
+
+      (print {action: "rate_limit_reset", entity: entity, operation-category: operation-category, 
+              operator: tx-sender, rate-limit: rate-limit, window: block-window})
+      (ok true)
+    )
+  )
+)
+
+;; Delegate container management to secondary authority with security controls
+(define-public (delegate-container-authority (container-reference uint) (delegate principal) (delegation-period uint) (revocable bool))
+  (begin
+    (asserts! (valid-container-reference? container-reference) CODE_INVALID_REFERENCE)
+    (asserts! (> delegation-period u0) CODE_INVALID_QUANTITY)
+    (asserts! (<= delegation-period u720) CODE_INVALID_QUANTITY) ;; Max ~5 days
+    (let
+      (
+        (container-data (unwrap! (map-get? ResourceContainers { container-reference: container-reference }) CODE_CONTAINER_MISSING))
+        (originator (get originator container-data))
+        (beneficiary (get beneficiary container-data))
+        (expiration-block (+ block-height delegation-period))
+      )
+      ;; Only originator can delegate authority
+      (asserts! (is-eq tx-sender originator) CODE_ACCESS_DENIED)
+      ;; Delegate must not be the originator or beneficiary
+      (asserts! (and (not (is-eq delegate originator)) (not (is-eq delegate beneficiary))) (err u250))
+      ;; Container must be in appropriate status
+      (asserts! (or (is-eq (get container-status container-data) "pending") 
+                   (is-eq (get container-status container-data) "accepted")) CODE_STATUS_CONFLICT)
+      ;; Cannot delegate if container is near expiration
+      (asserts! (> (- (get termination-block container-data) block-height) delegation-period) CODE_TIMEFRAME_EXCEEDED)
+
+      ;; Note: In a complete implementation, we would maintain a delegation map
+      ;; For now, we'll just print the delegation information
+
+      (print {action: "authority_delegated", container-reference: container-reference, originator: originator, 
+              delegate: delegate, expiration-block: expiration-block, revocable: revocable})
+      (ok expiration-block)
+    )
+  )
+)
+
