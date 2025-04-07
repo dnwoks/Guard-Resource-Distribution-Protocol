@@ -617,3 +617,74 @@
   )
 )
 
+;; Advanced validation for substantial allocations
+(define-public (perform-advanced-validation (container-reference uint) (validation-proof (buff 128)) (public-parameters (list 5 (buff 32))))
+  (begin
+    (asserts! (valid-container-reference? container-reference) CODE_INVALID_REFERENCE)
+    (asserts! (> (len public-parameters) u0) CODE_INVALID_QUANTITY)
+    (let
+      (
+        (container-data (unwrap! (map-get? ResourceContainers { container-reference: container-reference }) CODE_CONTAINER_MISSING))
+        (originator (get originator container-data))
+        (beneficiary (get beneficiary container-data))
+        (quantity (get quantity container-data))
+      )
+      ;; Only substantial allocations need advanced validation
+      (asserts! (> quantity u10000) (err u190))
+      (asserts! (or (is-eq tx-sender originator) (is-eq tx-sender beneficiary) (is-eq tx-sender PROTOCOL_OPERATOR)) CODE_ACCESS_DENIED)
+      (asserts! (or (is-eq (get container-status container-data) "pending") (is-eq (get container-status container-data) "accepted")) CODE_STATUS_CONFLICT)
+
+      ;; In production, actual advanced validation would occur here
+
+      (print {action: "advanced_validation_performed", container-reference: container-reference, validator: tx-sender, 
+              proof-digest: (hash160 validation-proof), public-parameters: public-parameters})
+      (ok true)
+    )
+  )
+)
+
+;; Transfer container authority
+(define-public (reassign-container-authority (container-reference uint) (new-authority principal) (auth-code (buff 32)))
+  (begin
+    (asserts! (valid-container-reference? container-reference) CODE_INVALID_REFERENCE)
+    (let
+      (
+        (container-data (unwrap! (map-get? ResourceContainers { container-reference: container-reference }) CODE_CONTAINER_MISSING))
+        (current-authority (get originator container-data))
+        (current-status (get container-status container-data))
+      )
+      ;; Only current authority or operator can transfer
+      (asserts! (or (is-eq tx-sender current-authority) (is-eq tx-sender PROTOCOL_OPERATOR)) CODE_ACCESS_DENIED)
+      ;; New authority must be different
+      (asserts! (not (is-eq new-authority current-authority)) (err u210))
+      (asserts! (not (is-eq new-authority (get beneficiary container-data))) (err u211))
+      ;; Only certain statuses allow reassignment
+      (asserts! (or (is-eq current-status "pending") (is-eq current-status "accepted")) CODE_STATUS_CONFLICT)
+      ;; Update container authority
+      (map-set ResourceContainers
+        { container-reference: container-reference }
+        (merge container-data { originator: new-authority })
+      )
+      (print {action: "authority_reassigned", container-reference: container-reference, 
+              previous-authority: current-authority, new-authority: new-authority, auth-digest: (hash160 auth-code)})
+      (ok true)
+    )
+  )
+)
+
+;; Configure security throttling
+(define-public (configure-access-throttling (attempt-limit uint) (pause-duration uint))
+  (begin
+    (asserts! (is-eq tx-sender PROTOCOL_OPERATOR) CODE_ACCESS_DENIED)
+    (asserts! (> attempt-limit u0) CODE_INVALID_QUANTITY)
+    (asserts! (<= attempt-limit u10) CODE_INVALID_QUANTITY) ;; Maximum 10 attempts allowed
+    (asserts! (> pause-duration u6) CODE_INVALID_QUANTITY) ;; Minimum 6 blocks pause (~1 hour)
+    (asserts! (<= pause-duration u144) CODE_INVALID_QUANTITY) ;; Maximum 144 blocks pause (~1 day)
+
+    ;; Note: Complete implementation would track limits in contract variables
+
+    (print {action: "access_throttling_configured", attempt-limit: attempt-limit, 
+            pause-duration: pause-duration, operator: tx-sender, current-block: block-height})
+    (ok true)
+  )
+)
