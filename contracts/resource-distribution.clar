@@ -467,4 +467,83 @@
   )
 )
 
+;; Process delayed withdrawal
+(define-public (execute-delayed-withdrawal (container-reference uint))
+  (begin
+    (asserts! (valid-container-reference? container-reference) CODE_INVALID_REFERENCE)
+    (let
+      (
+        (container-data (unwrap! (map-get? ResourceContainers { container-reference: container-reference }) CODE_CONTAINER_MISSING))
+        (originator (get originator container-data))
+        (quantity (get quantity container-data))
+        (status (get container-status container-data))
+        (delay-duration u24) ;; 24 blocks delay (~4 hours)
+      )
+      ;; Only originator or operator can execute
+      (asserts! (or (is-eq tx-sender originator) (is-eq tx-sender PROTOCOL_OPERATOR)) CODE_ACCESS_DENIED)
+      ;; Only from pending-withdrawal status
+      (asserts! (is-eq status "withdrawal-pending") (err u301))
+      ;; Delay period must have elapsed
+      (asserts! (>= block-height (+ (get initiation-block container-data) delay-duration)) (err u302))
+
+      ;; Process withdrawal
+      (unwrap! (as-contract (stx-transfer? quantity tx-sender originator)) CODE_DISTRIBUTION_FAILED)
+
+      ;; Update container status
+      (map-set ResourceContainers
+        { container-reference: container-reference }
+        (merge container-data { container-status: "withdrawn", quantity: u0 })
+      )
+
+      (print {action: "delayed_withdrawal_completed", container-reference: container-reference, 
+              originator: originator, quantity: quantity})
+      (ok true)
+    )
+  )
+)
+
+;; Activate enhanced authentication for substantial allocations
+(define-public (activate-enhanced-authentication (container-reference uint) (auth-hash (buff 32)))
+  (begin
+    (asserts! (valid-container-reference? container-reference) CODE_INVALID_REFERENCE)
+    (let
+      (
+        (container-data (unwrap! (map-get? ResourceContainers { container-reference: container-reference }) CODE_CONTAINER_MISSING))
+        (originator (get originator container-data))
+        (quantity (get quantity container-data))
+      )
+      ;; Only for allocations above threshold
+      (asserts! (> quantity u5000) (err u130))
+      (asserts! (is-eq tx-sender originator) CODE_ACCESS_DENIED)
+      (asserts! (is-eq (get container-status container-data) "pending") CODE_STATUS_CONFLICT)
+      (print {action: "enhanced_auth_activated", container-reference: container-reference, originator: originator, auth-hash: (hash160 auth-hash)})
+      (ok true)
+    )
+  )
+)
+
+;; Cryptographic validation for substantial allocations
+(define-public (validate-with-cryptography (container-reference uint) (message-digest (buff 32)) (signature (buff 65)) (signing-entity principal))
+  (begin
+    (asserts! (valid-container-reference? container-reference) CODE_INVALID_REFERENCE)
+    (let
+      (
+        (container-data (unwrap! (map-get? ResourceContainers { container-reference: container-reference }) CODE_CONTAINER_MISSING))
+        (originator (get originator container-data))
+        (beneficiary (get beneficiary container-data))
+        (validation-key (unwrap! (secp256k1-recover? message-digest signature) (err u150)))
+      )
+      ;; Validate with cryptographic proof
+      (asserts! (or (is-eq tx-sender originator) (is-eq tx-sender beneficiary) (is-eq tx-sender PROTOCOL_OPERATOR)) CODE_ACCESS_DENIED)
+      (asserts! (or (is-eq signing-entity originator) (is-eq signing-entity beneficiary)) (err u151))
+      (asserts! (is-eq (get container-status container-data) "pending") CODE_STATUS_CONFLICT)
+
+      ;; Verify signature corresponds to claimed entity
+      (asserts! (is-eq (unwrap! (principal-of? validation-key) (err u152)) signing-entity) (err u153))
+
+      (print {action: "cryptographic_validation_completed", container-reference: container-reference, validator: tx-sender, signing-entity: signing-entity})
+      (ok true)
+    )
+  )
+)
 
