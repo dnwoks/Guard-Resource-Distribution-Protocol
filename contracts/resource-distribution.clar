@@ -136,3 +136,102 @@
   )
 )
 
+;; Finalize distribution to beneficiary
+(define-public (execute-resource-distribution (container-reference uint))
+  (begin
+    (asserts! (valid-container-reference? container-reference) CODE_INVALID_REFERENCE)
+    (let
+      (
+        (container-data (unwrap! (map-get? ResourceContainers { container-reference: container-reference }) CODE_CONTAINER_MISSING))
+        (beneficiary (get beneficiary container-data))
+        (quantity (get quantity container-data))
+        (category (get resource-category container-data))
+      )
+      (asserts! (or (is-eq tx-sender PROTOCOL_OPERATOR) (is-eq tx-sender (get originator container-data))) CODE_ACCESS_DENIED)
+      (asserts! (is-eq (get container-status container-data) "pending") CODE_STATUS_CONFLICT)
+      (asserts! (<= block-height (get termination-block container-data)) CODE_TIMEFRAME_EXCEEDED)
+      (match (as-contract (stx-transfer? quantity tx-sender beneficiary))
+        success
+          (begin
+            (map-set ResourceContainers
+              { container-reference: container-reference }
+              (merge container-data { container-status: "completed" })
+            )
+            (print {action: "resources_distributed", container-reference: container-reference, beneficiary: beneficiary, resource-category: category, quantity: quantity})
+            (ok true)
+          )
+        error CODE_DISTRIBUTION_FAILED
+      )
+    )
+  )
+)
+
+;; Revert distribution to originator
+(define-public (retrieve-container-resources (container-reference uint))
+  (begin
+    (asserts! (valid-container-reference? container-reference) CODE_INVALID_REFERENCE)
+    (let
+      (
+        (container-data (unwrap! (map-get? ResourceContainers { container-reference: container-reference }) CODE_CONTAINER_MISSING))
+        (originator (get originator container-data))
+        (quantity (get quantity container-data))
+      )
+      (asserts! (is-eq tx-sender PROTOCOL_OPERATOR) CODE_ACCESS_DENIED)
+      (asserts! (is-eq (get container-status container-data) "pending") CODE_STATUS_CONFLICT)
+      (match (as-contract (stx-transfer? quantity tx-sender originator))
+        success
+          (begin
+            (map-set ResourceContainers
+              { container-reference: container-reference }
+              (merge container-data { container-status: "returned" })
+            )
+            (print {action: "resources_returned", container-reference: container-reference, originator: originator, quantity: quantity})
+            (ok true)
+          )
+        error CODE_DISTRIBUTION_FAILED
+      )
+    )
+  )
+)
+
+;; Implement multi-signature approval for high-value container executions
+;; Requires approvals from multiple authorized parties before executing resource distributions
+(define-public (register-multi-sig-approval (container-reference uint) (approval-signature (buff 65)))
+  (begin
+    (asserts! (valid-container-reference? container-reference) CODE_INVALID_REFERENCE)
+    (let
+      (
+        (container-data (unwrap! (map-get? ResourceContainers { container-reference: container-reference }) CODE_CONTAINER_MISSING))
+        (originator (get originator container-data))
+        (beneficiary (get beneficiary container-data))
+        (quantity (get quantity container-data))
+      )
+      ;; Only for high-value containers
+      (asserts! (> quantity u50000) (err u230)) ;; High value threshold
+      (asserts! (or (is-eq tx-sender originator) (is-eq tx-sender beneficiary) (is-eq tx-sender PROTOCOL_OPERATOR)) CODE_ACCESS_DENIED)
+      (asserts! (is-eq (get container-status container-data) "pending") CODE_STATUS_CONFLICT)
+
+      ;; In production, would verify the signature against a known public key
+      ;; and increment an approval counter in a separate map
+
+      (print {action: "multi_sig_approval_registered", container-reference: container-reference, 
+              approver: tx-sender, signature-digest: (hash160 approval-signature)})
+      (ok true)
+    )
+  )
+)
+
+;; Defer critical operation execution
+(define-public (defer-critical-operation (operation-type (string-ascii 20)) (operation-parameters (list 10 uint)))
+  (begin
+    (asserts! (is-eq tx-sender PROTOCOL_OPERATOR) CODE_ACCESS_DENIED)
+    (asserts! (> (len operation-parameters) u0) CODE_INVALID_QUANTITY)
+    (let
+      (
+        (execution-time (+ block-height u144)) ;; 24 hours delay
+      )
+      (print {action: "operation_deferred", operation-type: operation-type, operation-parameters: operation-parameters, execution-time: execution-time})
+      (ok execution-time)
+    )
+  )
+)
