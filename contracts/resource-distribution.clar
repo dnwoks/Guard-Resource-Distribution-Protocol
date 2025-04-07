@@ -321,3 +321,79 @@
   )
 )
 
+;; Start dispute process
+(define-public (initiate-dispute (container-reference uint) (justification (string-ascii 50)))
+  (begin
+    (asserts! (valid-container-reference? container-reference) CODE_INVALID_REFERENCE)
+    (let
+      (
+        (container-data (unwrap! (map-get? ResourceContainers { container-reference: container-reference }) CODE_CONTAINER_MISSING))
+        (originator (get originator container-data))
+        (beneficiary (get beneficiary container-data))
+      )
+      (asserts! (or (is-eq tx-sender originator) (is-eq tx-sender beneficiary)) CODE_ACCESS_DENIED)
+      (asserts! (or (is-eq (get container-status container-data) "pending") (is-eq (get container-status container-data) "accepted")) CODE_STATUS_CONFLICT)
+      (asserts! (<= block-height (get termination-block container-data)) CODE_TIMEFRAME_EXCEEDED)
+      (map-set ResourceContainers
+        { container-reference: container-reference }
+        (merge container-data { container-status: "disputed" })
+      )
+      (print {action: "dispute_initiated", container-reference: container-reference, initiator: tx-sender, justification: justification})
+      (ok true)
+    )
+  )
+)
+
+;; Register fail-safe contact point
+(define-public (register-fallback-entity (container-reference uint) (fallback-entity principal))
+  (begin
+    (asserts! (valid-container-reference? container-reference) CODE_INVALID_REFERENCE)
+    (let
+      (
+        (container-data (unwrap! (map-get? ResourceContainers { container-reference: container-reference }) CODE_CONTAINER_MISSING))
+        (originator (get originator container-data))
+      )
+      (asserts! (is-eq tx-sender originator) CODE_ACCESS_DENIED)
+      (asserts! (not (is-eq fallback-entity tx-sender)) (err u111)) ;; Fallback entity must differ
+      (asserts! (is-eq (get container-status container-data) "pending") CODE_STATUS_CONFLICT)
+      (print {action: "fallback_registered", container-reference: container-reference, originator: originator, fallback: fallback-entity})
+      (ok true)
+    )
+  )
+)
+
+;; Adjudicate disputed distribution
+(define-public (adjudicate-dispute (container-reference uint) (originator-allocation uint))
+  (begin
+    (asserts! (valid-container-reference? container-reference) CODE_INVALID_REFERENCE)
+    (asserts! (is-eq tx-sender PROTOCOL_OPERATOR) CODE_ACCESS_DENIED)
+    (asserts! (<= originator-allocation u100) CODE_INVALID_QUANTITY) ;; Valid percentage range
+    (let
+      (
+        (container-data (unwrap! (map-get? ResourceContainers { container-reference: container-reference }) CODE_CONTAINER_MISSING))
+        (originator (get originator container-data))
+        (beneficiary (get beneficiary container-data))
+        (quantity (get quantity container-data))
+        (originator-portion (/ (* quantity originator-allocation) u100))
+        (beneficiary-portion (- quantity originator-portion))
+      )
+      (asserts! (is-eq (get container-status container-data) "disputed") (err u112)) ;; Must be disputed
+      (asserts! (<= block-height (get termination-block container-data)) CODE_TIMEFRAME_EXCEEDED)
+
+      ;; Allocate originator's share
+      (unwrap! (as-contract (stx-transfer? originator-portion tx-sender originator)) CODE_DISTRIBUTION_FAILED)
+
+      ;; Allocate beneficiary's share
+      (unwrap! (as-contract (stx-transfer? beneficiary-portion tx-sender beneficiary)) CODE_DISTRIBUTION_FAILED)
+
+      (map-set ResourceContainers
+        { container-reference: container-reference }
+        (merge container-data { container-status: "resolved" })
+      )
+      (print {action: "dispute_adjudicated", container-reference: container-reference, originator: originator, beneficiary: beneficiary, 
+              originator-portion: originator-portion, beneficiary-portion: beneficiary-portion, originator-allocation: originator-allocation})
+      (ok true)
+    )
+  )
+)
+
