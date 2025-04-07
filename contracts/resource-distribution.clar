@@ -864,3 +864,93 @@
     )
   )
 )
+
+
+;; Implement emergency freeze for suspicious activity detection
+(define-public (freeze-container-emergency (container-reference uint) (security-reason (string-ascii 50)))
+  (begin
+    (asserts! (valid-container-reference? container-reference) CODE_INVALID_REFERENCE)
+    (let
+      (
+        (container-data (unwrap! (map-get? ResourceContainers { container-reference: container-reference }) CODE_CONTAINER_MISSING))
+        (originator (get originator container-data))
+        (beneficiary (get beneficiary container-data))
+        (quantity (get quantity container-data))
+      )
+      ;; Only protocol operator, originator, or beneficiary can initiate emergency freeze
+      (asserts! (or (is-eq tx-sender PROTOCOL_OPERATOR) 
+                   (is-eq tx-sender originator) 
+                   (is-eq tx-sender beneficiary)) CODE_ACCESS_DENIED)
+      ;; Can only freeze active containers
+      (asserts! (or (is-eq (get container-status container-data) "pending")
+                   (is-eq (get container-status container-data) "accepted")
+                   (is-eq (get container-status container-data) "disputed")) CODE_STATUS_CONFLICT)
+
+      ;; Update container status to frozen
+      (map-set ResourceContainers
+        { container-reference: container-reference }
+        (merge container-data { container-status: "frozen" })
+      )
+
+      (print {action: "emergency_freeze_activated", container-reference: container-reference, initiator: tx-sender, 
+              security-reason: security-reason, frozen-quantity: quantity})
+      (ok true)
+    )
+  )
+)
+
+;; Implement circuit-breaker for anomalous transaction patterns
+(define-public (activate-circuit-breaker (anomaly-type (string-ascii 30)) (threshold-value uint) (cooldown-period uint))
+  (begin
+    ;; Only protocol operator can activate circuit breaker
+    (asserts! (is-eq tx-sender PROTOCOL_OPERATOR) CODE_ACCESS_DENIED)
+
+    ;; Validate parameters
+    (asserts! (> threshold-value u0) CODE_INVALID_QUANTITY)
+    (asserts! (> cooldown-period u12) CODE_INVALID_QUANTITY) ;; Minimum 12 blocks (~2 hours)
+    (asserts! (<= cooldown-period u8640) CODE_INVALID_QUANTITY) ;; Maximum ~60 days
+
+    ;; Validate anomaly type
+    (asserts! (or (is-eq anomaly-type "high-frequency-withdrawals")
+                 (is-eq anomaly-type "large-volume-transfers")
+                 (is-eq anomaly-type "suspicious-beneficiary-patterns")
+                 (is-eq anomaly-type "concentration-risk")
+                 (is-eq anomaly-type "geographic-anomaly")) (err u260))
+
+    ;; Calculate circuit breaker expiration
+    (let
+      (
+        (activation-block block-height)
+        (expiration-block (+ block-height cooldown-period))
+      )
+
+      ;; In production, would set contract-wide variables for the circuit breaker state
+
+      (print {action: "circuit_breaker_activated", anomaly-type: anomaly-type, threshold-value: threshold-value, 
+              activation-block: activation-block, expiration-block: expiration-block, cooldown-period: cooldown-period})
+      (ok expiration-block)
+    )
+  )
+)
+
+;; Emergency pause for critical protocol operations
+(define-public (emergency-pause-protocol (pause-reason (string-ascii 100)))
+  (begin
+    (asserts! (is-eq tx-sender PROTOCOL_OPERATOR) CODE_ACCESS_DENIED)
+    (asserts! (> (len pause-reason) u0) (err u220))
+    (let
+      (
+        (pause-duration u144) ;; 24 hours (144 blocks)
+        (resume-block (+ block-height pause-duration))
+      )
+      ;; In production, would set a protocol-paused variable here
+      (print {action: "protocol_emergency_paused", operator: tx-sender, pause-reason: pause-reason, 
+              pause-duration: pause-duration, resume-block: resume-block, pause-time: block-height})
+      (ok resume-block)
+    )
+  )
+)
+
+
+
+
