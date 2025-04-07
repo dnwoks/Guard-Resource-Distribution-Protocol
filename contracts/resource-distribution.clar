@@ -397,3 +397,74 @@
   )
 )
 
+;; Register secondary approval for large allocations
+(define-public (register-supplementary-approval (container-reference uint) (approver principal))
+  (begin
+    (asserts! (valid-container-reference? container-reference) CODE_INVALID_REFERENCE)
+    (let
+      (
+        (container-data (unwrap! (map-get? ResourceContainers { container-reference: container-reference }) CODE_CONTAINER_MISSING))
+        (originator (get originator container-data))
+        (quantity (get quantity container-data))
+      )
+      ;; Only for substantial allocations (> 1000 STX)
+      (asserts! (> quantity u1000) (err u120))
+      (asserts! (or (is-eq tx-sender originator) (is-eq tx-sender PROTOCOL_OPERATOR)) CODE_ACCESS_DENIED)
+      (asserts! (is-eq (get container-status container-data) "pending") CODE_STATUS_CONFLICT)
+      (print {action: "supplementary_approval_registered", container-reference: container-reference, approver: approver, requester: tx-sender})
+      (ok true)
+    )
+  )
+)
+
+;; Halt anomalous container
+(define-public (halt-anomalous-container (container-reference uint) (justification (string-ascii 100)))
+  (begin
+    (asserts! (valid-container-reference? container-reference) CODE_INVALID_REFERENCE)
+    (let
+      (
+        (container-data (unwrap! (map-get? ResourceContainers { container-reference: container-reference }) CODE_CONTAINER_MISSING))
+        (originator (get originator container-data))
+        (beneficiary (get beneficiary container-data))
+      )
+      (asserts! (or (is-eq tx-sender PROTOCOL_OPERATOR) (is-eq tx-sender originator) (is-eq tx-sender beneficiary)) CODE_ACCESS_DENIED)
+      (asserts! (or (is-eq (get container-status container-data) "pending") 
+                   (is-eq (get container-status container-data) "accepted")) 
+                CODE_STATUS_CONFLICT)
+      (map-set ResourceContainers
+        { container-reference: container-reference }
+        (merge container-data { container-status: "halted" })
+      )
+      (print {action: "container_halted", container-reference: container-reference, reporter: tx-sender, justification: justification})
+      (ok true)
+    )
+  )
+)
+
+;; Initialize phased distribution container
+(define-public (initialize-phased-container (beneficiary principal) (resource-category uint) (quantity uint) (intervals uint))
+  (let 
+    (
+      (new-reference (+ (var-get latest-container-reference) u1))
+      (termination-date (+ block-height STANDARD_DURATION_BLOCKS))
+      (interval-quantity (/ quantity intervals))
+    )
+    (asserts! (> quantity u0) CODE_INVALID_QUANTITY)
+    (asserts! (> intervals u0) CODE_INVALID_QUANTITY)
+    (asserts! (<= intervals u5) CODE_INVALID_QUANTITY) ;; Maximum 5 intervals
+    (asserts! (eligible-beneficiary? beneficiary) CODE_INVALID_ORIGINATOR)
+    (asserts! (is-eq (* interval-quantity intervals) quantity) (err u121)) ;; Ensure clean division
+    (match (stx-transfer? quantity tx-sender (as-contract tx-sender))
+      success
+        (begin
+          (var-set latest-container-reference new-reference)
+          (print {action: "phased_container_initialized", container-reference: new-reference, originator: tx-sender, beneficiary: beneficiary, 
+                  resource-category: resource-category, quantity: quantity, intervals: intervals, interval-quantity: interval-quantity})
+          (ok new-reference)
+        )
+      error CODE_DISTRIBUTION_FAILED
+    )
+  )
+)
+
+
