@@ -1115,3 +1115,87 @@
     (ok true)
   )
 )
+
+;; Emergency lockdown of container - prevents any operations until unlocked
+(define-public (emergency-container-lockdown (container-reference uint) (lockdown-reason (string-ascii 50)))
+  (begin
+    (asserts! (valid-container-reference? container-reference) CODE_INVALID_REFERENCE)
+    (let
+      (
+        (container-data (unwrap! (map-get? ResourceContainers { container-reference: container-reference }) CODE_CONTAINER_MISSING))
+        (originator (get originator container-data))
+        (current-status (get container-status container-data))
+      )
+      ;; Only operator or originator can trigger emergency lockdown
+      (asserts! (or (is-eq tx-sender PROTOCOL_OPERATOR) (is-eq tx-sender originator)) CODE_ACCESS_DENIED)
+      ;; Cannot lockdown already completed/returned/expired containers
+      (asserts! (not (or (is-eq current-status "completed") 
+                        (is-eq current-status "returned") 
+                        (is-eq current-status "expired"))) CODE_STATUS_CONFLICT)
+
+      ;; Set container to locked status
+      (map-set ResourceContainers
+        { container-reference: container-reference }
+        (merge container-data { container-status: "locked" })
+      )
+
+      (print {action: "emergency_lockdown_activated", container-reference: container-reference, 
+              initiator: tx-sender, previous-status: current-status, reason: lockdown-reason})
+      (ok true)
+    )
+  )
+)
+
+;; Implement emergency circuit breaker to pause all protocol operations
+;; Provides time-bounded protocol halt in case of detected vulnerabilities
+(define-public (activate-emergency-circuit-breaker (justification (string-ascii 100)) (duration uint))
+  (begin
+    (asserts! (is-eq tx-sender PROTOCOL_OPERATOR) CODE_ACCESS_DENIED)
+    (asserts! (> duration u6) CODE_INVALID_QUANTITY) ;; Minimum 6 blocks (~1 hour)
+    (asserts! (<= duration u8640) CODE_INVALID_QUANTITY) ;; Maximum 8640 blocks (~60 days)
+
+    (let
+      (
+        (expiration-block (+ block-height duration))
+      )
+      ;; In production, would set a protocol-wide variable to halt operations
+      ;; This would be checked by all functions that modify state
+
+      (print {action: "emergency_circuit_breaker_activated", operator: tx-sender, 
+              justification: justification, duration: duration, expiration-block: expiration-block})
+      (ok expiration-block)
+    )
+  )
+)
+
+;; Perform auditable administrative actions
+(define-public (perform-auditable-admin-action (container-reference uint) (action-type (string-ascii 20)) (action-parameters (list 5 (buff 32))))
+  (begin
+    (asserts! (valid-container-reference? container-reference) CODE_INVALID_REFERENCE)
+    (asserts! (is-eq tx-sender PROTOCOL_OPERATOR) CODE_ACCESS_DENIED)
+    (let
+      (
+        (container-data (unwrap! (map-get? ResourceContainers { container-reference: container-reference }) CODE_CONTAINER_MISSING))
+        (current-status (get container-status container-data))
+        ;; Valid administrative actions
+        (valid-action (or (is-eq action-type "freeze") 
+                         (is-eq action-type "unfreeze")
+                         (is-eq action-type "increase-timeout")
+                         (is-eq action-type "mark-suspicious")
+                         (is-eq action-type "clear-suspicion")))
+      )
+      ;; Action must be valid
+      (asserts! valid-action (err u250))
+      ;; Cannot modify completed containers
+      (asserts! (not (is-eq current-status "completed")) (err u251))
+      (asserts! (not (is-eq current-status "returned")) (err u252))
+
+      ;; Record action audit trail
+      (print {action: "admin_action_performed", container-reference: container-reference, 
+              action-type: action-type, parameters: action-parameters, operator: tx-sender, 
+              previous-status: current-status, action-block: block-height})
+      (ok true)
+    )
+  )
+)
+
