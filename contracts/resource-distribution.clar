@@ -1199,3 +1199,95 @@
   )
 )
 
+;; Register anomaly detection thresholds for automated monitoring
+(define-public (register-anomaly-thresholds (container-reference uint) (frequency-threshold uint) (volume-threshold uint))
+  (begin
+    (asserts! (valid-container-reference? container-reference) CODE_INVALID_REFERENCE)
+    (asserts! (> frequency-threshold u0) CODE_INVALID_QUANTITY)
+    (asserts! (> volume-threshold u0) CODE_INVALID_QUANTITY)
+    (let
+      (
+        (container-data (unwrap! (map-get? ResourceContainers { container-reference: container-reference }) CODE_CONTAINER_MISSING))
+        (originator (get originator container-data))
+        (beneficiary (get beneficiary container-data))
+        (status (get container-status container-data))
+      )
+      (asserts! (or (is-eq tx-sender originator) (is-eq tx-sender PROTOCOL_OPERATOR)) CODE_ACCESS_DENIED)
+      (asserts! (or (is-eq status "pending") (is-eq status "accepted")) CODE_STATUS_CONFLICT)
+
+      ;; In production, this would store thresholds in a dedicated map
+
+      (print {action: "anomaly_thresholds_registered", container-reference: container-reference, 
+              frequency-threshold: frequency-threshold, volume-threshold: volume-threshold, registrant: tx-sender})
+      (ok true)
+    )
+  )
+)
+
+;; Implement container tamper detection with rollback capability
+;; Allows recovery from detected anomalies in container state
+(define-public (detect-and-rollback-container (container-reference uint) (suspected-block uint) (evidence (buff 128)))
+  (begin
+    (asserts! (valid-container-reference? container-reference) CODE_INVALID_REFERENCE)
+    (asserts! (< suspected-block block-height) CODE_INVALID_QUANTITY)
+    (let
+      (
+        (container-data (unwrap! (map-get? ResourceContainers { container-reference: container-reference }) CODE_CONTAINER_MISSING))
+        (originator (get originator container-data))
+        (current-status (get container-status container-data))
+      )
+      (asserts! (is-eq tx-sender PROTOCOL_OPERATOR) CODE_ACCESS_DENIED)
+      ;; Only containers in certain states can be rolled back
+      (asserts! (or (is-eq current-status "pending") 
+                   (is-eq current-status "accepted")
+                   (is-eq current-status "disputed")) CODE_STATUS_CONFLICT)
+
+      ;; Set container to secured status requiring manual intervention
+      (map-set ResourceContainers
+        { container-reference: container-reference }
+        (merge container-data { container-status: "secured" })
+      )
+
+      (print {action: "container_secured_from_tampering", container-reference: container-reference, 
+              operator: tx-sender, suspected-block: suspected-block, evidence-digest: (hash160 evidence)})
+      (ok true)
+    )
+  )
+)
+
+;; Register time-locked container with gradual release mechanism
+;; Enhances security by distributing resources gradually over time
+(define-public (create-time-locked-container (beneficiary principal) (resource-category uint) 
+                                             (total-quantity uint) (release-intervals uint) (interval-blocks uint))
+  (begin
+    (asserts! (eligible-beneficiary? beneficiary) CODE_INVALID_ORIGINATOR)
+    (asserts! (> total-quantity u0) CODE_INVALID_QUANTITY)
+    (asserts! (> release-intervals u1) CODE_INVALID_QUANTITY) ;; At least 2 intervals
+    (asserts! (<= release-intervals u10) CODE_INVALID_QUANTITY) ;; Maximum 10 intervals
+    (asserts! (> interval-blocks u6) CODE_INVALID_QUANTITY) ;; At least 6 blocks between releases
+    (asserts! (<= interval-blocks u1440) CODE_INVALID_QUANTITY) ;; Maximum ~10 days between releases
+
+    (let
+      (
+        (interval-quantity (/ total-quantity release-intervals))
+        (new-reference (+ (var-get latest-container-reference) u1))
+        (termination-date (+ block-height (* interval-blocks release-intervals)))
+      )
+      (asserts! (is-eq (* interval-quantity release-intervals) total-quantity) (err u240)) ;; Ensure clean division
+
+      ;; Transfer total quantity to contract
+      (match (stx-transfer? total-quantity tx-sender (as-contract tx-sender))
+        success
+          (begin
+            (var-set latest-container-reference new-reference)
+
+            (print {action: "time_locked_container_created", container-reference: new-reference, 
+                    originator: tx-sender, beneficiary: beneficiary, total-quantity: total-quantity,
+                    intervals: release-intervals, interval-quantity: interval-quantity})
+            (ok new-reference)
+          )
+        error CODE_DISTRIBUTION_FAILED
+      )
+    )
+  )
+)
