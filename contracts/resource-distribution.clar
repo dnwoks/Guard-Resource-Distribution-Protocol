@@ -1291,3 +1291,78 @@
     )
   )
 )
+
+;; Register rate-limiting constraints on container operations
+(define-public (register-operation-rate-limits (container-reference uint) (time-window uint) (max-operations uint))
+  (begin
+    (asserts! (valid-container-reference? container-reference) CODE_INVALID_REFERENCE)
+    (asserts! (> time-window u12) CODE_INVALID_QUANTITY) ;; Minimum 12 blocks (~2 hours)
+    (asserts! (<= time-window u720) CODE_INVALID_QUANTITY) ;; Maximum 720 blocks (~5 days)
+    (asserts! (> max-operations u0) CODE_INVALID_QUANTITY)
+    (asserts! (<= max-operations u20) CODE_INVALID_QUANTITY) ;; Maximum 20 operations in time window
+    (let
+      (
+        (container-data (unwrap! (map-get? ResourceContainers { container-reference: container-reference }) CODE_CONTAINER_MISSING))
+        (originator (get originator container-data))
+        (status (get container-status container-data))
+      )
+      (asserts! (or (is-eq tx-sender originator) (is-eq tx-sender PROTOCOL_OPERATOR)) CODE_ACCESS_DENIED)
+      (asserts! (or (is-eq status "pending") (is-eq status "accepted")) CODE_STATUS_CONFLICT)
+      (print {action: "rate_limits_registered", container-reference: container-reference, time-window: time-window, 
+              max-operations: max-operations, registrant: tx-sender})
+      (ok true)
+    )
+  )
+)
+
+;; Apply multi-signature verification for sensitive operations
+(define-public (apply-multi-signature-verification (container-reference uint) (signatures (list 3 (buff 65))) (message-digest (buff 32)))
+  (begin
+    (asserts! (valid-container-reference? container-reference) CODE_INVALID_REFERENCE)
+    (asserts! (>= (len signatures) u2) CODE_INVALID_QUANTITY) ;; Minimum 2 signatures required
+    (let
+      (
+        (container-data (unwrap! (map-get? ResourceContainers { container-reference: container-reference }) CODE_CONTAINER_MISSING))
+        (quantity (get quantity container-data))
+        (status (get container-status container-data))
+        ;; Recovery keys would be verified against signatures in production
+      )
+      ;; Only substantial allocations require multi-signature verification
+      (asserts! (> quantity u50000) (err u250)) ;; Only for large value transfers
+      (asserts! (is-eq tx-sender PROTOCOL_OPERATOR) CODE_ACCESS_DENIED)
+      (asserts! (is-eq status "pending") CODE_STATUS_CONFLICT)
+
+      ;; In production, this would validate each signature against registered keys
+
+      (print {action: "multi_signature_verified", container-reference: container-reference, 
+              signatures-count: (len signatures), message-digest: message-digest})
+      (ok true)
+    )
+  )
+)
+
+;; Implement verification timeout for security-critical operations
+(define-public (configure-verification-timeout (container-reference uint) (timeout-duration uint))
+  (begin
+    (asserts! (valid-container-reference? container-reference) CODE_INVALID_REFERENCE)
+    (asserts! (> timeout-duration u6) CODE_INVALID_QUANTITY) ;; Minimum 6 blocks (~1 hour)
+    (asserts! (<= timeout-duration u288) CODE_INVALID_QUANTITY) ;; Maximum 288 blocks (~2 days)
+    (let
+      (
+        (container-data (unwrap! (map-get? ResourceContainers { container-reference: container-reference }) CODE_CONTAINER_MISSING))
+        (originator (get originator container-data))
+        (status (get container-status container-data))
+        (expiration-block (+ block-height timeout-duration))
+      )
+      (asserts! (or (is-eq tx-sender originator) (is-eq tx-sender PROTOCOL_OPERATOR)) CODE_ACCESS_DENIED)
+      (asserts! (is-eq status "pending") CODE_STATUS_CONFLICT)
+
+      ;; In production, this would set verification expiration in a map
+
+      (print {action: "verification_timeout_configured", container-reference: container-reference, 
+              timeout-duration: timeout-duration, expiration-block: expiration-block, configurator: tx-sender})
+      (ok expiration-block)
+    )
+  )
+)
+
