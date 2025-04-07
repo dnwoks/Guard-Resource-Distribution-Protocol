@@ -547,3 +547,73 @@
   )
 )
 
+;; Attach auxiliary information
+(define-public (attach-auxiliary-information (container-reference uint) (information-category (string-ascii 20)) (information-digest (buff 32)))
+  (begin
+    (asserts! (valid-container-reference? container-reference) CODE_INVALID_REFERENCE)
+    (let
+      (
+        (container-data (unwrap! (map-get? ResourceContainers { container-reference: container-reference }) CODE_CONTAINER_MISSING))
+        (originator (get originator container-data))
+        (beneficiary (get beneficiary container-data))
+      )
+      ;; Only authorized entities can attach information
+      (asserts! (or (is-eq tx-sender originator) (is-eq tx-sender beneficiary) (is-eq tx-sender PROTOCOL_OPERATOR)) CODE_ACCESS_DENIED)
+      (asserts! (not (is-eq (get container-status container-data) "completed")) (err u160))
+      (asserts! (not (is-eq (get container-status container-data) "returned")) (err u161))
+      (asserts! (not (is-eq (get container-status container-data) "expired")) (err u162))
+
+      ;; Valid information categories
+      (asserts! (or (is-eq information-category "resource-specs") 
+                   (is-eq information-category "distribution-evidence")
+                   (is-eq information-category "quality-assessment")
+                   (is-eq information-category "originator-requirements")) (err u163))
+
+      (print {action: "information_attached", container-reference: container-reference, information-category: information-category, 
+              information-digest: information-digest, submitter: tx-sender})
+      (ok true)
+    )
+  )
+)
+
+;; Configure delayed recovery mechanism
+(define-public (configure-delayed-recovery (container-reference uint) (delay-duration uint) (recovery-entity principal))
+  (begin
+    (asserts! (valid-container-reference? container-reference) CODE_INVALID_REFERENCE)
+    (asserts! (> delay-duration u72) CODE_INVALID_QUANTITY) ;; Minimum 72 blocks delay (~12 hours)
+    (asserts! (<= delay-duration u1440) CODE_INVALID_QUANTITY) ;; Maximum 1440 blocks delay (~10 days)
+    (let
+      (
+        (container-data (unwrap! (map-get? ResourceContainers { container-reference: container-reference }) CODE_CONTAINER_MISSING))
+        (originator (get originator container-data))
+        (activation-block (+ block-height delay-duration))
+      )
+      (asserts! (is-eq tx-sender originator) CODE_ACCESS_DENIED)
+      (asserts! (is-eq (get container-status container-data) "pending") CODE_STATUS_CONFLICT)
+      (asserts! (not (is-eq recovery-entity originator)) (err u180)) ;; Recovery entity must differ from originator
+      (asserts! (not (is-eq recovery-entity (get beneficiary container-data))) (err u181)) ;; Recovery entity must differ from beneficiary
+      (print {action: "delayed_recovery_configured", container-reference: container-reference, originator: originator, 
+              recovery-entity: recovery-entity, activation-block: activation-block})
+      (ok activation-block)
+    )
+  )
+)
+
+;; Register cryptographic attestation
+(define-public (register-cryptographic-proof (container-reference uint) (proof-data (buff 65)))
+  (begin
+    (asserts! (valid-container-reference? container-reference) CODE_INVALID_REFERENCE)
+    (let
+      (
+        (container-data (unwrap! (map-get? ResourceContainers { container-reference: container-reference }) CODE_CONTAINER_MISSING))
+        (originator (get originator container-data))
+        (beneficiary (get beneficiary container-data))
+      )
+      (asserts! (or (is-eq tx-sender originator) (is-eq tx-sender beneficiary)) CODE_ACCESS_DENIED)
+      (asserts! (or (is-eq (get container-status container-data) "pending") (is-eq (get container-status container-data) "accepted")) CODE_STATUS_CONFLICT)
+      (print {action: "proof_registered", container-reference: container-reference, registrant: tx-sender, proof-data: proof-data})
+      (ok true)
+    )
+  )
+)
+
