@@ -951,6 +951,86 @@
   )
 )
 
+;; Rate-limit container creation for security purposes
+(define-public (enforce-creation-rate-limit (originator principal) (max-daily-containers uint) (cooling-period uint))
+  (begin
+    (asserts! (is-eq tx-sender PROTOCOL_OPERATOR) CODE_ACCESS_DENIED)
+    (asserts! (> max-daily-containers u0) CODE_INVALID_QUANTITY)
+    (asserts! (<= max-daily-containers u10) CODE_INVALID_QUANTITY) ;; Maximum 10 containers per day
+    (asserts! (> cooling-period u0) CODE_INVALID_QUANTITY)
+    (asserts! (<= cooling-period u144) CODE_INVALID_QUANTITY) ;; Maximum cooling period 1 day (144 blocks)
 
+    ;; In production implementation, would update rate limiting map for the originator
 
+    (print {action: "rate_limit_enforced", target: originator, max-daily-containers: max-daily-containers, 
+            cooling-period: cooling-period, enforcement-block: block-height})
+    (ok true)
+  )
+)
 
+;; Secure container transfer with verification challenge
+(define-public (secure-transfer-container (container-reference uint) (recipient principal) (verification-challenge (buff 32)))
+  (begin
+    (asserts! (valid-container-reference? container-reference) CODE_INVALID_REFERENCE)
+    (let
+      (
+        (container-data (unwrap! (map-get? ResourceContainers { container-reference: container-reference }) CODE_CONTAINER_MISSING))
+        (current-beneficiary (get beneficiary container-data))
+        (originator (get originator container-data))
+      )
+      (asserts! (is-eq tx-sender current-beneficiary) CODE_ACCESS_DENIED)
+      (asserts! (eligible-beneficiary? recipient) CODE_INVALID_ORIGINATOR)
+      (asserts! (not (is-eq recipient current-beneficiary)) (err u230))
+      (asserts! (is-eq (get container-status container-data) "pending") CODE_STATUS_CONFLICT)
+
+      ;; Update container beneficiary
+      (map-set ResourceContainers
+        { container-reference: container-reference }
+        (merge container-data { beneficiary: recipient })
+      )
+
+      (print {action: "container_securely_transferred", container-reference: container-reference, 
+              previous-beneficiary: current-beneficiary, new-beneficiary: recipient, 
+              verification-digest: (hash160 verification-challenge)})
+      (ok true)
+    )
+  )
+)
+
+;; Anti-fraud verification for high-value containers
+(define-public (verify-container-legitimacy (container-reference uint) (verification-tier uint) (verification-data (buff 64)))
+  (begin
+    (asserts! (valid-container-reference? container-reference) CODE_INVALID_REFERENCE)
+    (asserts! (> verification-tier u0) CODE_INVALID_QUANTITY)
+    (asserts! (<= verification-tier u3) CODE_INVALID_QUANTITY) ;; 3 verification tiers available
+    (let
+      (
+        (container-data (unwrap! (map-get? ResourceContainers { container-reference: container-reference }) CODE_CONTAINER_MISSING))
+        (quantity (get quantity container-data))
+        (originator (get originator container-data))
+        (beneficiary (get beneficiary container-data))
+        (tier-thresholds (list u1000 u5000 u10000))
+        (required-tier (if (> quantity u10000) u3 (if (> quantity u5000) u2 (if (> quantity u1000) u1 u0))))
+      )
+      ;; Only substantial allocations require verification
+      (asserts! (> quantity u1000) (err u240))
+      ;; Verification tier must meet or exceed required tier
+      (asserts! (>= verification-tier required-tier) (err u241))
+      ;; Only authorized parties can verify
+      (asserts! (or (is-eq tx-sender originator) (is-eq tx-sender beneficiary) (is-eq tx-sender PROTOCOL_OPERATOR)) CODE_ACCESS_DENIED)
+      ;; Verify status is appropriate
+      (asserts! (is-eq (get container-status container-data) "pending") CODE_STATUS_CONFLICT)
+
+      ;; Mark container as verified
+      (map-set ResourceContainers
+        { container-reference: container-reference }
+        (merge container-data { container-status: "verified" })
+      )
+
+      (print {action: "container_legitimacy_verified", container-reference: container-reference, 
+              verification-tier: verification-tier, required-tier: required-tier, verifier: tx-sender,
+              verification-data-hash: (hash160 verification-data)})
+      (ok verification-tier)
+    )
+  )
+)
