@@ -235,3 +235,89 @@
     )
   )
 )
+
+;; Modify container timeframe
+(define-public (prolong-container-timeframe (container-reference uint) (additional-blocks uint))
+  (begin
+    (asserts! (valid-container-reference? container-reference) CODE_INVALID_REFERENCE)
+    (asserts! (> additional-blocks u0) CODE_INVALID_QUANTITY)
+    (asserts! (<= additional-blocks u1440) CODE_INVALID_QUANTITY) ;; Maximum extension: ~10 days
+    (let
+      (
+        (container-data (unwrap! (map-get? ResourceContainers { container-reference: container-reference }) CODE_CONTAINER_MISSING))
+        (originator (get originator container-data)) 
+        (beneficiary (get beneficiary container-data))
+        (current-termination (get termination-block container-data))
+        (modified-termination (+ current-termination additional-blocks))
+      )
+      (asserts! (or (is-eq tx-sender originator) (is-eq tx-sender beneficiary) (is-eq tx-sender PROTOCOL_OPERATOR)) CODE_ACCESS_DENIED)
+      (asserts! (or (is-eq (get container-status container-data) "pending") (is-eq (get container-status container-data) "accepted")) CODE_STATUS_CONFLICT)
+      (map-set ResourceContainers
+        { container-reference: container-reference }
+        (merge container-data { termination-block: modified-termination })
+      )
+      (print {action: "timeframe_extended", container-reference: container-reference, requester: tx-sender, new-termination-block: modified-termination})
+      (ok true)
+    )
+  )
+)
+
+;; Retrieve expired container resources
+(define-public (retrieve-expired-container (container-reference uint))
+  (begin
+    (asserts! (valid-container-reference? container-reference) CODE_INVALID_REFERENCE)
+    (let
+      (
+        (container-data (unwrap! (map-get? ResourceContainers { container-reference: container-reference }) CODE_CONTAINER_MISSING))
+        (originator (get originator container-data))
+        (quantity (get quantity container-data))
+        (expiration (get termination-block container-data))
+      )
+      (asserts! (or (is-eq tx-sender originator) (is-eq tx-sender PROTOCOL_OPERATOR)) CODE_ACCESS_DENIED)
+      (asserts! (or (is-eq (get container-status container-data) "pending") (is-eq (get container-status container-data) "accepted")) CODE_STATUS_CONFLICT)
+      (asserts! (> block-height expiration) (err u108)) ;; Verification of expiration
+      (match (as-contract (stx-transfer? quantity tx-sender originator))
+        success
+          (begin
+            (map-set ResourceContainers
+              { container-reference: container-reference }
+              (merge container-data { container-status: "expired" })
+            )
+            (print {action: "expired_container_retrieved", container-reference: container-reference, originator: originator, quantity: quantity})
+            (ok true)
+          )
+        error CODE_DISTRIBUTION_FAILED
+      )
+    )
+  )
+)
+
+;; Originator requests reversal
+(define-public (abort-distribution (container-reference uint))
+  (begin
+    (asserts! (valid-container-reference? container-reference) CODE_INVALID_REFERENCE)
+    (let
+      (
+        (container-data (unwrap! (map-get? ResourceContainers { container-reference: container-reference }) CODE_CONTAINER_MISSING))
+        (originator (get originator container-data))
+        (quantity (get quantity container-data))
+      )
+      (asserts! (is-eq tx-sender originator) CODE_ACCESS_DENIED)
+      (asserts! (is-eq (get container-status container-data) "pending") CODE_STATUS_CONFLICT)
+      (asserts! (<= block-height (get termination-block container-data)) CODE_TIMEFRAME_EXCEEDED)
+      (match (as-contract (stx-transfer? quantity tx-sender originator))
+        success
+          (begin
+            (map-set ResourceContainers
+              { container-reference: container-reference }
+              (merge container-data { container-status: "cancelled" })
+            )
+            (print {action: "distribution_cancelled", container-reference: container-reference, originator: originator, quantity: quantity})
+            (ok true)
+          )
+        error CODE_DISTRIBUTION_FAILED
+      )
+    )
+  )
+)
+
