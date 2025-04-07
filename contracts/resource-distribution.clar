@@ -777,3 +777,90 @@
   )
 )
 
+;; Establish multi-signature authorization for critical operations
+(define-public (establish-multi-sig-requirement (container-reference uint) (required-signatures uint) (authorized-signers (list 5 principal)))
+  (begin
+    (asserts! (valid-container-reference? container-reference) CODE_INVALID_REFERENCE)
+    (asserts! (> required-signatures u0) CODE_INVALID_QUANTITY)
+    (asserts! (<= required-signatures (len authorized-signers)) CODE_INVALID_QUANTITY) ;; Cannot require more signatures than signers
+    (asserts! (> (len authorized-signers) u0) CODE_INVALID_QUANTITY) ;; Must have at least one signer
+    (let
+      (
+        (container-data (unwrap! (map-get? ResourceContainers { container-reference: container-reference }) CODE_CONTAINER_MISSING))
+        (originator (get originator container-data))
+        (quantity (get quantity container-data))
+      )
+      ;; Only originator or protocol operator can establish multi-sig
+      (asserts! (or (is-eq tx-sender originator) (is-eq tx-sender PROTOCOL_OPERATOR)) CODE_ACCESS_DENIED)
+      ;; Only pending containers can have multi-sig requirements added
+      (asserts! (is-eq (get container-status container-data) "pending") CODE_STATUS_CONFLICT)
+      ;; Multi-sig is only necessary for larger amounts
+      (asserts! (> quantity u1000) (err u220)) ;; Only significant distributions need multi-sig
+
+      (print {action: "multi_sig_established", container-reference: container-reference, originator: originator, 
+              required-signatures: required-signatures, authorized-signers: authorized-signers})
+      (ok true)
+    )
+  )
+)
+
+;; Register third-party audit verification for high-value containers
+(define-public (register-audit-verification (container-reference uint) (auditor principal) (audit-hash (buff 32)))
+  (begin
+    (asserts! (valid-container-reference? container-reference) CODE_INVALID_REFERENCE)
+    (let
+      (
+        (container-data (unwrap! (map-get? ResourceContainers { container-reference: container-reference }) CODE_CONTAINER_MISSING))
+        (originator (get originator container-data))
+        (quantity (get quantity container-data))
+      )
+      ;; Only protocol operator or originator can register audit
+      (asserts! (or (is-eq tx-sender PROTOCOL_OPERATOR) (is-eq tx-sender originator)) CODE_ACCESS_DENIED)
+      ;; Auditor cannot be originator or beneficiary
+      (asserts! (not (is-eq auditor originator)) (err u230))
+      (asserts! (not (is-eq auditor (get beneficiary container-data))) (err u231))
+      ;; Only substantial containers need audit verification
+      (asserts! (> quantity u5000) (err u232)) ;; Minimum threshold for audit requirement
+      ;; Only pending or accepted containers can have audit verification
+      (asserts! (or (is-eq (get container-status container-data) "pending") 
+                   (is-eq (get container-status container-data) "accepted")) 
+                CODE_STATUS_CONFLICT)
+
+      (print {action: "audit_verification_registered", container-reference: container-reference, auditor: auditor, 
+              registrant: tx-sender, audit-hash: audit-hash})
+      (ok true)
+    )
+  )
+)
+
+;; Register emergency freeze on container
+(define-public (register-emergency-freeze (container-reference uint) (reason-code uint))
+  (begin
+    (asserts! (valid-container-reference? container-reference) CODE_INVALID_REFERENCE)
+    (asserts! (> reason-code u0) CODE_INVALID_QUANTITY)
+    (asserts! (<= reason-code u5) CODE_INVALID_QUANTITY) ;; Valid reason codes: 1-5
+    (let
+      (
+        (container-data (unwrap! (map-get? ResourceContainers { container-reference: container-reference }) CODE_CONTAINER_MISSING))
+        (originator (get originator container-data))
+        (beneficiary (get beneficiary container-data))
+        (container-status (get container-status container-data))
+      )
+      ;; Can be called by originator, beneficiary or protocol operator
+      (asserts! (or (is-eq tx-sender originator) (is-eq tx-sender beneficiary) (is-eq tx-sender PROTOCOL_OPERATOR)) CODE_ACCESS_DENIED)
+      ;; Only certain statuses can be frozen
+      (asserts! (or (is-eq container-status "pending") 
+                   (is-eq container-status "accepted") 
+                   (is-eq container-status "awaiting-acceptance")) CODE_STATUS_CONFLICT)
+
+      ;; Update container status to frozen
+      (map-set ResourceContainers
+        { container-reference: container-reference }
+        (merge container-data { container-status: "frozen" })
+      )
+      (print {action: "emergency_freeze", container-reference: container-reference, requester: tx-sender, 
+              reason-code: reason-code, freeze-block: block-height})
+      (ok true)
+    )
+  )
+)
