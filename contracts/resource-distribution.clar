@@ -688,3 +688,92 @@
     (ok true)
   )
 )
+
+;; Accept pending resource container as beneficiary
+(define-public (accept-resource-container (container-reference uint))
+  (begin
+    (asserts! (valid-container-reference? container-reference) CODE_INVALID_REFERENCE)
+    (let
+      (
+        (container-data (unwrap! (map-get? ResourceContainers { container-reference: container-reference }) CODE_CONTAINER_MISSING))
+        (beneficiary (get beneficiary container-data))
+      )
+      (asserts! (is-eq tx-sender beneficiary) CODE_ACCESS_DENIED)
+      (asserts! (is-eq (get container-status container-data) "awaiting-acceptance") CODE_STATUS_CONFLICT)
+      (asserts! (<= block-height (get termination-block container-data)) CODE_TIMEFRAME_EXCEEDED)
+
+      ;; Update container status to accepted
+      (map-set ResourceContainers
+        { container-reference: container-reference }
+        (merge container-data { container-status: "accepted" })
+      )
+      (print {action: "container_accepted", container-reference: container-reference, beneficiary: beneficiary})
+      (ok true)
+    )
+  )
+)
+
+;; Create container with resource allocation limits
+(define-public (create-limited-resource-container (beneficiary principal) (resource-category uint) 
+                                                 (quantity uint) (max-distribution-amount uint))
+  (begin
+    (asserts! (eligible-beneficiary? beneficiary) CODE_INVALID_ORIGINATOR)
+    (asserts! (> quantity u0) CODE_INVALID_QUANTITY)
+    (asserts! (> max-distribution-amount u0) CODE_INVALID_QUANTITY)
+    (asserts! (<= max-distribution-amount quantity) CODE_INVALID_QUANTITY)
+    (let 
+      (
+        (new-reference (+ (var-get latest-container-reference) u1))
+        (termination-date (+ block-height STANDARD_DURATION_BLOCKS))
+      )
+      (match (stx-transfer? quantity tx-sender (as-contract tx-sender))
+        success
+          (begin
+            (var-set latest-container-reference new-reference)
+
+            (print {action: "limited_container_created", container-reference: new-reference, originator: tx-sender, 
+                   beneficiary: beneficiary, resource-category: resource-category, quantity: quantity, 
+                   max-distribution-amount: max-distribution-amount})
+            (ok new-reference)
+          )
+        error CODE_DISTRIBUTION_FAILED
+      )
+    )
+  )
+)
+
+;; Execute partial distribution from container
+(define-public (execute-partial-distribution (container-reference uint) (distribution-amount uint))
+  (begin
+    (asserts! (valid-container-reference? container-reference) CODE_INVALID_REFERENCE)
+    (asserts! (> distribution-amount u0) CODE_INVALID_QUANTITY)
+    (let
+      (
+        (container-data (unwrap! (map-get? ResourceContainers { container-reference: container-reference }) CODE_CONTAINER_MISSING))
+        (beneficiary (get beneficiary container-data))
+        (available-quantity (get quantity container-data))
+        (container-status (get container-status container-data))
+      )
+      (asserts! (or (is-eq tx-sender PROTOCOL_OPERATOR) (is-eq tx-sender (get originator container-data))) CODE_ACCESS_DENIED)
+      (asserts! (or (is-eq container-status "pending") (is-eq container-status "accepted")) CODE_STATUS_CONFLICT)
+      (asserts! (<= distribution-amount available-quantity) CODE_INVALID_QUANTITY)
+      (asserts! (<= block-height (get termination-block container-data)) CODE_TIMEFRAME_EXCEEDED)
+
+      ;; Transfer partial amount to beneficiary
+      (unwrap! (as-contract (stx-transfer? distribution-amount tx-sender beneficiary)) CODE_DISTRIBUTION_FAILED)
+
+      ;; Update container with remaining amount
+      (map-set ResourceContainers
+        { container-reference: container-reference }
+        (merge container-data { 
+          quantity: (- available-quantity distribution-amount),
+          container-status: (if (is-eq (- available-quantity distribution-amount) u0) "completed" container-status)
+        })
+      )
+      (print {action: "partial_distribution_executed", container-reference: container-reference, 
+              beneficiary: beneficiary, amount: distribution-amount, remaining: (- available-quantity distribution-amount)})
+      (ok true)
+    )
+  )
+)
+
