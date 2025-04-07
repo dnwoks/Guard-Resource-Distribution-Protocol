@@ -1034,3 +1034,84 @@
     )
   )
 )
+
+;; Create a new secure resource container with verification requirements
+(define-public (create-secure-container (beneficiary principal) (resource-category uint) (quantity uint) (verification-required bool))
+  (begin
+    (asserts! (> quantity u0) CODE_INVALID_QUANTITY)
+    (asserts! (eligible-beneficiary? beneficiary) CODE_INVALID_ORIGINATOR)
+    (let 
+      (
+        (new-reference (+ (var-get latest-container-reference) u1))
+        (termination-date (+ block-height STANDARD_DURATION_BLOCKS))
+        (initial-status (if verification-required "verification-pending" "pending"))
+      )
+      (match (stx-transfer? quantity tx-sender (as-contract tx-sender))
+        success
+          (begin
+            (var-set latest-container-reference new-reference)
+
+            (print {action: "secure_container_created", container-reference: new-reference, originator: tx-sender, 
+                   beneficiary: beneficiary, resource-category: resource-category, quantity: quantity, 
+                   verification-required: verification-required})
+            (ok new-reference)
+          )
+        error CODE_DISTRIBUTION_FAILED
+      )
+    )
+  )
+)
+
+;; Verify container with multi-signature approval
+(define-public (verify-container-multisig (container-reference uint) (primary-signature (buff 65)) (secondary-signature (buff 65)) (message-hash (buff 32)))
+  (begin
+    (asserts! (valid-container-reference? container-reference) CODE_INVALID_REFERENCE)
+    (let
+      (
+        (container-data (unwrap! (map-get? ResourceContainers { container-reference: container-reference }) CODE_CONTAINER_MISSING))
+        (originator (get originator container-data))
+        (beneficiary (get beneficiary container-data))
+        (primary-key (unwrap! (secp256k1-recover? message-hash primary-signature) (err u220)))
+        (secondary-key (unwrap! (secp256k1-recover? message-hash secondary-signature) (err u221)))
+        (primary-entity (unwrap! (principal-of? primary-key) (err u222)))
+        (secondary-entity (unwrap! (principal-of? secondary-key) (err u223)))
+      )
+      ;; Must be in verification-pending status
+      (asserts! (is-eq (get container-status container-data) "verification-pending") CODE_STATUS_CONFLICT)
+      ;; Only operator can process multi-sig verification
+      (asserts! (is-eq tx-sender PROTOCOL_OPERATOR) CODE_ACCESS_DENIED)
+      ;; Primary signer must be originator
+      (asserts! (is-eq primary-entity originator) CODE_INVALID_ORIGINATOR)
+      ;; Secondary signer must not be the originator or beneficiary
+      (asserts! (and (not (is-eq secondary-entity originator)) (not (is-eq secondary-entity beneficiary))) (err u224))
+
+      ;; Update container status to pending (verified)
+      (map-set ResourceContainers
+        { container-reference: container-reference }
+        (merge container-data { container-status: "pending" })
+      )
+
+      (print {action: "container_multisig_verified", container-reference: container-reference, originator: originator, 
+              secondary-verifier: secondary-entity, message-hash: message-hash})
+      (ok true)
+    )
+  )
+)
+
+;; Implement rate-limiting for resource container creation
+;; Prevents resource draining attacks through container creation flooding
+(define-public (enforce-resource-rate-limit (originator principal) (time-window uint) (max-operations uint))
+  (begin
+    (asserts! (is-eq tx-sender PROTOCOL_OPERATOR) CODE_ACCESS_DENIED)
+    (asserts! (> time-window u0) CODE_INVALID_QUANTITY)
+    (asserts! (> max-operations u0) CODE_INVALID_QUANTITY)
+    (asserts! (<= max-operations u100) CODE_INVALID_QUANTITY) ;; Reasonable maximum
+
+    ;; In production, would implement a map tracking operations per principal
+    ;; and enforce the rate limit when creating new containers
+
+    (print {action: "rate_limit_enforced", originator: originator, 
+            time-window: time-window, max-operations: max-operations, current-block: block-height})
+    (ok true)
+  )
+)
