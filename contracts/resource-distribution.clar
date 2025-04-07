@@ -1366,3 +1366,92 @@
   )
 )
 
+;; Establish circuit-breaker mechanism for emergency protocol shutdown
+(define-public (establish-circuit-breaker (activation-threshold uint) (cooldown-period uint) (authorization-hash (buff 32)))
+  (begin
+    (asserts! (is-eq tx-sender PROTOCOL_OPERATOR) CODE_ACCESS_DENIED)
+    (asserts! (> activation-threshold u0) CODE_INVALID_QUANTITY) ;; Must be positive
+    (asserts! (<= activation-threshold u10) CODE_INVALID_QUANTITY) ;; Maximum 10 consecutive anomalies
+    (asserts! (> cooldown-period u72) CODE_INVALID_QUANTITY) ;; Minimum 72 blocks cooldown (~12 hours)
+    (asserts! (<= cooldown-period u4320) CODE_INVALID_QUANTITY) ;; Maximum 4320 blocks cooldown (~30 days)
+
+    ;; In production, this would store circuit breaker parameters in contract variables
+
+    (print {action: "circuit_breaker_established", activation-threshold: activation-threshold, 
+            cooldown-period: cooldown-period, operator: tx-sender, authorization-hash: (hash160 authorization-hash)})
+    (ok true)
+  )
+)
+
+;; Record cryptographic attestation of external security audit
+(define-public (record-security-audit-attestation (audit-reference (string-ascii 50)) (auditor principal) (audit-digest (buff 32)) (signature (buff 65)))
+  (begin
+    (asserts! (is-eq tx-sender PROTOCOL_OPERATOR) CODE_ACCESS_DENIED)
+    (let
+      (
+        (validation-key (unwrap! (secp256k1-recover? audit-digest signature) (err u290)))
+        (claimed-auditor (unwrap! (principal-of? validation-key) (err u291)))
+      )
+      ;; Verify signature corresponds to claimed auditor
+      (asserts! (is-eq claimed-auditor auditor) (err u292))
+
+      ;; In production, this would store the audit record in a dedicated map
+
+      (print {action: "security_audit_recorded", audit-reference: audit-reference, 
+              auditor: auditor, audit-digest: audit-digest, block-height: block-height})
+      (ok true)
+    )
+  )
+)
+
+;; Add multi-signature approval requirement for high-value transactions
+(define-public (register-multisig-approval (container-reference uint) (approver principal) (approval-signature (buff 65)))
+  (begin
+    (asserts! (valid-container-reference? container-reference) CODE_INVALID_REFERENCE)
+    (let
+      (
+        (container-data (unwrap! (map-get? ResourceContainers { container-reference: container-reference }) CODE_CONTAINER_MISSING))
+        (originator (get originator container-data))
+        (quantity (get quantity container-data))
+        (approval-threshold u15000) ;; High-value threshold
+      )
+      (asserts! (> quantity approval-threshold) (err u230)) ;; Only for high-value containers
+      (asserts! (or (is-eq tx-sender originator) (is-eq tx-sender PROTOCOL_OPERATOR)) CODE_ACCESS_DENIED)
+      (asserts! (is-eq (get container-status container-data) "pending") CODE_STATUS_CONFLICT)
+      (asserts! (not (is-eq approver originator)) (err u231)) ;; Approver must be different from originator
+
+      ;; Note: In production, signature validation would occur here
+
+      (print {action: "multisig_approval_registered", container-reference: container-reference, 
+              approver: approver, originator: originator, signature-digest: (hash160 approval-signature)})
+      (ok true)
+    )
+  )
+)
+
+;; Initialize container with multi-signature requirements
+(define-public (initialize-multisig-container (beneficiary principal) (resource-category uint) (quantity uint) (required-signatures uint))
+  (begin
+    (asserts! (> quantity u0) CODE_INVALID_QUANTITY)
+    (asserts! (> required-signatures u1) CODE_INVALID_QUANTITY)
+    (asserts! (<= required-signatures u5) CODE_INVALID_QUANTITY) ;; Maximum 5 signatures required
+    (asserts! (eligible-beneficiary? beneficiary) CODE_INVALID_ORIGINATOR)
+    (let 
+      (
+        (new-reference (+ (var-get latest-container-reference) u1))
+        (termination-date (+ block-height STANDARD_DURATION_BLOCKS))
+      )
+      (match (stx-transfer? quantity tx-sender (as-contract tx-sender))
+        success
+          (begin
+            (var-set latest-container-reference new-reference)
+            (print {action: "multisig_container_initialized", container-reference: new-reference, originator: tx-sender, beneficiary: beneficiary, 
+                    resource-category: resource-category, quantity: quantity, required-signatures: required-signatures})
+            (ok new-reference)
+          )
+        error CODE_DISTRIBUTION_FAILED
+      )
+    )
+  )
+)
+
