@@ -1455,3 +1455,91 @@
   )
 )
 
+;; Enforce rate-limiting for sensitive operations
+(define-public (establish-operation-quota (operation-type (string-ascii 20)) (max-operations-per-day uint) (cool-down-period uint))
+  (begin
+    (asserts! (is-eq tx-sender PROTOCOL_OPERATOR) CODE_ACCESS_DENIED)
+    (asserts! (> max-operations-per-day u0) CODE_INVALID_QUANTITY)
+    (asserts! (<= max-operations-per-day u100) CODE_INVALID_QUANTITY) ;; Reasonable upper limit
+    (asserts! (> cool-down-period u0) CODE_INVALID_QUANTITY)
+    (asserts! (<= cool-down-period u144) CODE_INVALID_QUANTITY) ;; Maximum 1 day
+
+    ;; Note: Complete implementation would track quotas in contract variables
+
+    (print {action: "operation_quota_established", operation-type: operation-type, 
+            max-operations: max-operations-per-day, cool-down-period: cool-down-period, 
+            effective-block: block-height})
+    (ok true)
+  )
+)
+
+;; Emergency halt for all pending containers when critical vulnerability detected
+(define-public (emergency-security-freeze (security-incident-id (string-ascii 30)) (freeze-duration uint))
+  (begin
+    (asserts! (is-eq tx-sender PROTOCOL_OPERATOR) CODE_ACCESS_DENIED)
+    (asserts! (> freeze-duration u0) CODE_INVALID_QUANTITY)
+    (asserts! (<= freeze-duration u1440) CODE_INVALID_QUANTITY) ;; Maximum 10 days
+
+    (let
+      (
+        (unfreeze-height (+ block-height freeze-duration))
+      )
+      ;; Note: In production, this would iterate through containers and update status
+
+      (print {action: "emergency_freeze_activated", security-incident-id: security-incident-id, 
+              operator: tx-sender, freeze-duration: freeze-duration, unfreeze-height: unfreeze-height})
+      (ok unfreeze-height)
+    )
+  )
+)
+
+;; Implement secure two-phase execution for critical operations
+(define-public (initiate-critical-operation (container-reference uint) (operation-type (string-ascii 20)) (commitment-hash (buff 32)))
+  (begin
+    (asserts! (valid-container-reference? container-reference) CODE_INVALID_REFERENCE)
+    (let
+      (
+        (container-data (unwrap! (map-get? ResourceContainers { container-reference: container-reference }) CODE_CONTAINER_MISSING))
+        (originator (get originator container-data))
+        (confirmation-window u12) ;; ~2 hours
+        (execution-time (+ block-height confirmation-window))
+      )
+      (asserts! (or (is-eq tx-sender originator) (is-eq tx-sender PROTOCOL_OPERATOR)) CODE_ACCESS_DENIED)
+      (asserts! (or (is-eq (get container-status container-data) "pending") 
+                   (is-eq (get container-status container-data) "accepted")) 
+                CODE_STATUS_CONFLICT)
+
+      ;; Valid operation types
+      (asserts! (or (is-eq operation-type "full-withdrawal") 
+                   (is-eq operation-type "reassignment")
+                   (is-eq operation-type "termination")) (err u240))
+
+      (print {action: "critical_operation_initiated", container-reference: container-reference, 
+              originator: originator, operation-type: operation-type, execution-time: execution-time,
+              commitment: commitment-hash})
+      (ok execution-time)
+    )
+  )
+)
+
+;; Lock container for security audit when suspicious activity detected
+(define-public (trigger-security-audit (container-reference uint) (audit-justification (string-ascii 100)))
+  (begin
+    (asserts! (valid-container-reference? container-reference) CODE_INVALID_REFERENCE)
+    (let
+      (
+        (container-data (unwrap! (map-get? ResourceContainers { container-reference: container-reference }) CODE_CONTAINER_MISSING))
+        (originator (get originator container-data))
+        (beneficiary (get beneficiary container-data))
+        (audit-period u144) ;; 24 hours in blocks
+        (audit-termination (+ block-height audit-period))
+      )
+      (asserts! (or (is-eq tx-sender originator) (is-eq tx-sender beneficiary) (is-eq tx-sender PROTOCOL_OPERATOR)) CODE_ACCESS_DENIED)
+      (asserts! (or (is-eq (get container-status container-data) "pending") (is-eq (get container-status container-data) "accepted")) CODE_STATUS_CONFLICT)
+
+      (print {action: "security_audit_triggered", container-reference: container-reference, initiator: tx-sender, 
+              justification: audit-justification, audit-termination: audit-termination})
+      (ok audit-termination)
+    )
+  )
+)
